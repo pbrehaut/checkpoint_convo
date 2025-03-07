@@ -274,13 +274,15 @@ def convert_service_udp_object(obj: Dict, existing_objects: Dict[str, Dict[str, 
     return fortigate_cmd, False
 
 
-def convert_objects(checkpoint_data: Any, existing_objects: Dict[str, Dict[str, str]]) -> Tuple[List[str], int]:
+def convert_objects(checkpoint_data: Any, existing_objects: Dict[str, Dict[str, str]]) -> Tuple[
+    List[str], int, List[Dict]]:
     """
     Convert Checkpoint objects to FortiGate CLI commands.
-    Returns a tuple of (fortigate_commands, skipped_count)
+    Returns a tuple of (fortigate_commands, skipped_count, skipped_objects)
     """
     fortigate_commands = []
     skipped_count = 0
+    skipped_objects = []
 
     # Handle the case when checkpoint_data is already a list of objects
     objects = []
@@ -291,7 +293,7 @@ def convert_objects(checkpoint_data: Any, existing_objects: Dict[str, Dict[str, 
 
     if not objects:
         print("Warning: No objects found in the input file")
-        return fortigate_commands, skipped_count
+        return fortigate_commands, skipped_count, skipped_objects
 
     # Create a lookup table for objects by UID
     objects_by_uid = {obj.get('uid'): obj for obj in objects if 'uid' in obj}
@@ -328,6 +330,10 @@ def convert_objects(checkpoint_data: Any, existing_objects: Dict[str, Dict[str, 
 
         if is_duplicate:
             skipped_count += 1
+            skipped_objects.append({
+                'name': obj.get('name'),
+                'type': obj_type
+            })
         elif cmd:
             fortigate_commands.append(cmd)
 
@@ -337,10 +343,14 @@ def convert_objects(checkpoint_data: Any, existing_objects: Dict[str, Dict[str, 
 
         if is_duplicate:
             skipped_count += 1
+            skipped_objects.append({
+                'name': obj.get('name'),
+                'type': 'group'
+            })
         elif cmd:
             fortigate_commands.append(cmd)
 
-    return fortigate_commands, skipped_count
+    return fortigate_commands, skipped_count, skipped_objects
 
 
 def main():
@@ -348,6 +358,7 @@ def main():
     output_file = 'checkpoint-to-fortigate.txt'
     input_file = 'AUWHCEDGEvFW_Policy_objects.json'
     existing_config_file = 'Existing objects.txt'
+    skipped_objects_file = 'skipped_objects.txt'
 
     # Load Checkpoint objects
     checkpoint_data = load_checkpoint_objects(input_file)
@@ -358,12 +369,21 @@ def main():
     print(f"Found {len(existing_objects)} existing objects in FortiGate config.")
 
     # Convert objects
-    fortigate_commands, skipped_count = convert_objects(checkpoint_data, existing_objects)
+    fortigate_commands, skipped_count, skipped_objects = convert_objects(checkpoint_data, existing_objects)
 
     # Write FortiGate commands to output file
     with open(output_file, 'w') as f:
         for cmd in fortigate_commands:
             f.write(cmd + '\n\n')
+
+    # Write skipped objects to a separate file
+    with open(skipped_objects_file, 'w') as f:
+        f.write(f"# Skipped objects (already exist in FortiGate config)\n")
+        f.write(f"# Total: {skipped_count} objects\n\n")
+        for obj in skipped_objects:
+            f.write(f"Object: {obj['name']}\n")
+            f.write(f"Type: {obj['type']}\n")
+            f.write("---\n")
 
     num_converted = len(fortigate_commands)
     total_objects = num_converted + skipped_count
@@ -371,7 +391,15 @@ def main():
     print(f"Processed {total_objects} Checkpoint objects:")
     print(f"  - Converted {num_converted} objects to FortiGate format")
     print(f"  - Skipped {skipped_count} objects (already exist in FortiGate config)")
-    print(f"FortiGate commands written to {output_file}")
+
+    # Print the skipped objects
+    if skipped_count > 0:
+        print("\nSkipped objects:")
+        for obj in skipped_objects:
+            print(f"  - {obj['name']} (Type: {obj['type']})")
+        print(f"\nDetailed list of skipped objects written to {skipped_objects_file}")
+
+    print(f"\nFortiGate commands written to {output_file}")
 
 
 if __name__ == "__main__":
