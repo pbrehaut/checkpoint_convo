@@ -1,6 +1,7 @@
 import json
 import sys
-from typing import Dict, List, Any, Optional
+import re
+from typing import Dict, List, Any, Optional, Set, Tuple
 
 
 def load_checkpoint_objects(filename: str) -> Any:
@@ -17,14 +18,77 @@ def load_checkpoint_objects(filename: str) -> Any:
         sys.exit(1)
 
 
-def convert_host_object(obj: Dict) -> Optional[str]:
-    """Convert a Checkpoint host object to FortiGate format."""
+def load_existing_fortigate_config(filename: str) -> Dict[str, Dict[str, str]]:
+    """
+    Load existing FortiGate configuration and extract object names and types.
+    Returns a dictionary with object names as keys and their details as values.
+    """
+    existing_objects = {}
+
+    try:
+        with open(filename, 'r') as f:
+            config_content = f.read()
+
+        # Extract address objects
+        # Pattern to match edit statements followed by object details
+        pattern = r'edit\s+"([^"]+)"(.*?)next'
+        matches = re.findall(pattern, config_content, re.DOTALL)
+
+        for match in matches:
+            object_name = match[0]
+            object_details = match[1].strip()
+
+            # Extract type information
+            type_match = re.search(r'set\s+type\s+(\w+)', object_details)
+            obj_type = type_match.group(1) if type_match else "unknown"
+
+            # Extract IP information based on object type
+            ip_info = {}
+            if obj_type == "ipmask":
+                subnet_match = re.search(r'set\s+subnet\s+([0-9.]+/[0-9]+)', object_details)
+                if subnet_match:
+                    ip_info["subnet"] = subnet_match.group(1)
+            elif obj_type == "iprange":
+                start_ip_match = re.search(r'set\s+start-ip\s+([0-9.]+)', object_details)
+                end_ip_match = re.search(r'set\s+end-ip\s+([0-9.]+)', object_details)
+                if start_ip_match:
+                    ip_info["start-ip"] = start_ip_match.group(1)
+                if end_ip_match:
+                    ip_info["end-ip"] = end_ip_match.group(1)
+
+            existing_objects[object_name] = {
+                "type": obj_type,
+                "ip_info": ip_info
+            }
+
+    except FileNotFoundError:
+        print(f"Warning: Existing FortiGate config file {filename} not found. Will create all new objects.")
+
+    return existing_objects
+
+
+def convert_host_object(obj: Dict, existing_objects: Dict[str, Dict[str, str]]) -> Tuple[Optional[str], bool]:
+    """
+    Convert a Checkpoint host object to FortiGate format.
+    Returns a tuple of (command_string, is_duplicate)
+    """
     name = obj.get('name')
     ipv4_address = obj.get('ipv4-address')
     comment = obj.get('comments', '')
 
     if not name or not ipv4_address:
-        return None
+        return None, False
+
+    # Check if this object already exists in FortiGate config
+    is_duplicate = False
+    if name in existing_objects:
+        existing_obj = existing_objects[name]
+        if existing_obj["type"] == "ipmask":
+            if "subnet" in existing_obj["ip_info"] and existing_obj["ip_info"]["subnet"] == f"{ipv4_address}/32":
+                is_duplicate = True
+
+    if is_duplicate:
+        return None, True
 
     fortigate_cmd = f"config firewall address\n"
     fortigate_cmd += f"    edit \"{name}\"\n"
@@ -35,18 +99,32 @@ def convert_host_object(obj: Dict) -> Optional[str]:
         fortigate_cmd += f"        set comment \"{comment}\"\n"
 
     fortigate_cmd += f"    next\nend"
-    return fortigate_cmd
+    return fortigate_cmd, False
 
 
-def convert_network_object(obj: Dict) -> Optional[str]:
-    """Convert a Checkpoint network object to FortiGate format."""
+def convert_network_object(obj: Dict, existing_objects: Dict[str, Dict[str, str]]) -> Tuple[Optional[str], bool]:
+    """
+    Convert a Checkpoint network object to FortiGate format.
+    Returns a tuple of (command_string, is_duplicate)
+    """
     name = obj.get('name')
     subnet4 = obj.get('subnet4')
     mask_length4 = obj.get('mask-length4')
     comment = obj.get('comments', '')
 
     if not name or not subnet4 or mask_length4 is None:
-        return None
+        return None, False
+
+    # Check if this object already exists in FortiGate config
+    is_duplicate = False
+    if name in existing_objects:
+        existing_obj = existing_objects[name]
+        if existing_obj["type"] == "ipmask":
+            if "subnet" in existing_obj["ip_info"] and existing_obj["ip_info"]["subnet"] == f"{subnet4}/{mask_length4}":
+                is_duplicate = True
+
+    if is_duplicate:
+        return None, True
 
     fortigate_cmd = f"config firewall address\n"
     fortigate_cmd += f"    edit \"{name}\"\n"
@@ -57,18 +135,35 @@ def convert_network_object(obj: Dict) -> Optional[str]:
         fortigate_cmd += f"        set comment \"{comment}\"\n"
 
     fortigate_cmd += f"    next\nend"
-    return fortigate_cmd
+    return fortigate_cmd, False
 
 
-def convert_range_object(obj: Dict) -> Optional[str]:
-    """Convert a Checkpoint address range object to FortiGate format."""
+def convert_range_object(obj: Dict, existing_objects: Dict[str, Dict[str, str]]) -> Tuple[Optional[str], bool]:
+    """
+    Convert a Checkpoint address range object to FortiGate format.
+    Returns a tuple of (command_string, is_duplicate)
+    """
     name = obj.get('name')
     ipv4_address_first = obj.get('ipv4-address-first')
     ipv4_address_last = obj.get('ipv4-address-last')
     comment = obj.get('comments', '')
 
     if not name or not ipv4_address_first or not ipv4_address_last:
-        return None
+        return None, False
+
+    # Check if this object already exists in FortiGate config
+    is_duplicate = False
+    if name in existing_objects:
+        existing_obj = existing_objects[name]
+        if existing_obj["type"] == "iprange":
+            if ("start-ip" in existing_obj["ip_info"] and
+                    "end-ip" in existing_obj["ip_info"] and
+                    existing_obj["ip_info"]["start-ip"] == ipv4_address_first and
+                    existing_obj["ip_info"]["end-ip"] == ipv4_address_last):
+                is_duplicate = True
+
+    if is_duplicate:
+        return None, True
 
     fortigate_cmd = f"config firewall address\n"
     fortigate_cmd += f"    edit \"{name}\"\n"
@@ -80,17 +175,25 @@ def convert_range_object(obj: Dict) -> Optional[str]:
         fortigate_cmd += f"        set comment \"{comment}\"\n"
 
     fortigate_cmd += f"    next\nend"
-    return fortigate_cmd
+    return fortigate_cmd, False
 
 
-def convert_group_object(obj: Dict, objects_by_uid: Dict) -> Optional[str]:
-    """Convert a Checkpoint group object to FortiGate format."""
+def convert_group_object(obj: Dict, objects_by_uid: Dict, existing_objects: Dict[str, Dict[str, str]]) -> Tuple[
+    Optional[str], bool]:
+    """
+    Convert a Checkpoint group object to FortiGate format.
+    Returns a tuple of (command_string, is_duplicate)
+    """
     name = obj.get('name')
     members = obj.get('members', [])
     comment = obj.get('comments', '')
 
     if not name or not members:
-        return None
+        return None, False
+
+    # Simple check for duplicate (just by name, can't easily check members)
+    if name in existing_objects:
+        return None, True
 
     fortigate_cmd = f"config firewall addrgrp\n"
     fortigate_cmd += f"    edit \"{name}\"\n"
@@ -100,7 +203,9 @@ def convert_group_object(obj: Dict, objects_by_uid: Dict) -> Optional[str]:
     for member_uid in members:
         if member_uid in objects_by_uid:
             member_obj = objects_by_uid[member_uid]
-            member_names.append(member_obj.get('name'))
+            member_name = member_obj.get('name')
+            if member_name:
+                member_names.append(member_name)
 
     if member_names:
         member_str = ' '.join(f'"{name}"' for name in member_names)
@@ -110,17 +215,24 @@ def convert_group_object(obj: Dict, objects_by_uid: Dict) -> Optional[str]:
         fortigate_cmd += f"        set comment \"{comment}\"\n"
 
     fortigate_cmd += f"    next\nend"
-    return fortigate_cmd
+    return fortigate_cmd, False
 
 
-def convert_service_tcp_object(obj: Dict) -> Optional[str]:
-    """Convert a Checkpoint TCP service object to FortiGate format."""
+def convert_service_tcp_object(obj: Dict, existing_objects: Dict[str, Dict[str, str]]) -> Tuple[Optional[str], bool]:
+    """
+    Convert a Checkpoint TCP service object to FortiGate format.
+    Returns a tuple of (command_string, is_duplicate)
+    """
     name = obj.get('name')
     port = obj.get('port')
     comment = obj.get('comments', '')
 
     if not name or not port:
-        return None
+        return None, False
+
+    # Simple check for duplicate by name
+    if name in existing_objects:
+        return None, True
 
     fortigate_cmd = f"config firewall service custom\n"
     fortigate_cmd += f"    edit \"{name}\"\n"
@@ -131,17 +243,24 @@ def convert_service_tcp_object(obj: Dict) -> Optional[str]:
         fortigate_cmd += f"        set comment \"{comment}\"\n"
 
     fortigate_cmd += f"    next\nend"
-    return fortigate_cmd
+    return fortigate_cmd, False
 
 
-def convert_service_udp_object(obj: Dict) -> Optional[str]:
-    """Convert a Checkpoint UDP service object to FortiGate format."""
+def convert_service_udp_object(obj: Dict, existing_objects: Dict[str, Dict[str, str]]) -> Tuple[Optional[str], bool]:
+    """
+    Convert a Checkpoint UDP service object to FortiGate format.
+    Returns a tuple of (command_string, is_duplicate)
+    """
     name = obj.get('name')
     port = obj.get('port')
     comment = obj.get('comments', '')
 
     if not name or not port:
-        return None
+        return None, False
+
+    # Simple check for duplicate by name
+    if name in existing_objects:
+        return None, True
 
     fortigate_cmd = f"config firewall service custom\n"
     fortigate_cmd += f"    edit \"{name}\"\n"
@@ -152,12 +271,16 @@ def convert_service_udp_object(obj: Dict) -> Optional[str]:
         fortigate_cmd += f"        set comment \"{comment}\"\n"
 
     fortigate_cmd += f"    next\nend"
-    return fortigate_cmd
+    return fortigate_cmd, False
 
 
-def convert_objects(checkpoint_data: Any) -> List[str]:
-    """Convert Checkpoint objects to FortiGate CLI commands."""
+def convert_objects(checkpoint_data: Any, existing_objects: Dict[str, Dict[str, str]]) -> Tuple[List[str], int]:
+    """
+    Convert Checkpoint objects to FortiGate CLI commands.
+    Returns a tuple of (fortigate_commands, skipped_count)
+    """
     fortigate_commands = []
+    skipped_count = 0
 
     # Handle the case when checkpoint_data is already a list of objects
     objects = []
@@ -168,47 +291,74 @@ def convert_objects(checkpoint_data: Any) -> List[str]:
 
     if not objects:
         print("Warning: No objects found in the input file")
-        return fortigate_commands
+        return fortigate_commands, skipped_count
 
     # Create a lookup table for objects by UID
     objects_by_uid = {obj.get('uid'): obj for obj in objects if 'uid' in obj}
 
     # Process objects in the right order (simple objects first, then groups)
+    # First, separate simple objects and group objects
+    simple_objects = []
+    group_objects = []
+
     for obj in objects:
         obj_type = obj.get('type')
+        if obj_type == 'group':
+            group_objects.append(obj)
+        else:
+            simple_objects.append(obj)
+
+    # Process simple objects first
+    for obj in simple_objects:
+        obj_type = obj.get('type')
+        cmd = None
+        is_duplicate = False
 
         if obj_type == 'host':
-            cmd = convert_host_object(obj)
+            cmd, is_duplicate = convert_host_object(obj, existing_objects)
         elif obj_type == 'network':
-            cmd = convert_network_object(obj)
+            cmd, is_duplicate = convert_network_object(obj, existing_objects)
         elif obj_type == 'address-range':
-            cmd = convert_range_object(obj)
+            cmd, is_duplicate = convert_range_object(obj, existing_objects)
         elif obj_type == 'service-tcp':
-            cmd = convert_service_tcp_object(obj)
+            cmd, is_duplicate = convert_service_tcp_object(obj, existing_objects)
         elif obj_type == 'service-udp':
-            cmd = convert_service_udp_object(obj)
-        elif obj_type == 'group':
-            cmd = convert_group_object(obj, objects_by_uid)
-        else:
-            # Skip unsupported object types
-            continue
+            cmd, is_duplicate = convert_service_udp_object(obj, existing_objects)
+        # Skip unsupported object types
 
-        if cmd:
+        if is_duplicate:
+            skipped_count += 1
+        elif cmd:
             fortigate_commands.append(cmd)
 
-    return fortigate_commands
+    # Then process group objects
+    for obj in group_objects:
+        cmd, is_duplicate = convert_group_object(obj, objects_by_uid, existing_objects)
+
+        if is_duplicate:
+            skipped_count += 1
+        elif cmd:
+            fortigate_commands.append(cmd)
+
+    return fortigate_commands, skipped_count
 
 
 def main():
     """Main function."""
     output_file = 'checkpoint-to-fortigate.txt'
     input_file = 'AUWHCEDGEvFW_Policy_objects.json'
+    existing_config_file = 'Existing objects.txt'
 
     # Load Checkpoint objects
     checkpoint_data = load_checkpoint_objects(input_file)
 
+    # Load existing FortiGate configuration
+    print(f"Checking for existing objects in {existing_config_file}...")
+    existing_objects = load_existing_fortigate_config(existing_config_file)
+    print(f"Found {len(existing_objects)} existing objects in FortiGate config.")
+
     # Convert objects
-    fortigate_commands = convert_objects(checkpoint_data)
+    fortigate_commands, skipped_count = convert_objects(checkpoint_data, existing_objects)
 
     # Write FortiGate commands to output file
     with open(output_file, 'w') as f:
@@ -216,7 +366,11 @@ def main():
             f.write(cmd + '\n\n')
 
     num_converted = len(fortigate_commands)
-    print(f"Converted {num_converted} Checkpoint objects to FortiGate format")
+    total_objects = num_converted + skipped_count
+
+    print(f"Processed {total_objects} Checkpoint objects:")
+    print(f"  - Converted {num_converted} objects to FortiGate format")
+    print(f"  - Skipped {skipped_count} objects (already exist in FortiGate config)")
     print(f"FortiGate commands written to {output_file}")
 
 
